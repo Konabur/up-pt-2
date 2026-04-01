@@ -63,6 +63,12 @@ plant_params = data['plant_params']
 scanner_pos = data['scanner_pos']
 total_gt_volume = data['total_gt_volume']
 
+# Для совместимости с сохранением результатов:
+# в реальных облаках/старых NPZ эти поля могут отсутствовать
+all_pts_clean = data.get('all_pts_clean', all_pts_noisy)
+all_pts_occluded = data.get('all_pts_occluded', all_pts_noisy)
+n_occluded = max(0, len(all_pts_clean) - len(all_pts_occluded))
+
 print(f"\n  Точек земли (исходно): {len(ground_pts)}")
 print(f"  Точек растительности (исходно): {len(vegetation_pts)}")
 print(f"  Точек итого (с шумом): {len(all_pts_noisy)}")
