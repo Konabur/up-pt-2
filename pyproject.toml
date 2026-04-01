@@ -1,7 +1,7 @@
 [project]
-name = "nir3-komissiya"
-version = "0.1.0"
-description = "Add your description here"
+name = "tls-volume-estimation"
+version = "0.2.0"
+description = "TLS point cloud volume estimation methods"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
