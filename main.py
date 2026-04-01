@@ -18,192 +18,53 @@ from matplotlib.gridspec import GridSpec
 from scipy.spatial import ConvexHull
 import json
 import os
-
-np.random.seed(42)
+import argparse
+from pathlib import Path
+from generate_cloud import generate_full_cloud, load_cloud, save_cloud, load_real_cloud
 
 OUTPUT_DIR = "results"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 # ============================================================
-# 1. ГЕНЕРАЦИЯ СИНТЕТИЧЕСКОГО ОБЛАКА ТОЧЕК
+# 1. ЗАГРУЗКА ИЛИ ГЕНЕРАЦИЯ ОБЛАКА ТОЧЕК
 # ============================================================
 
-def generate_ground(x_range=(-2, 2), y_range=(-2, 2), density=5000, noise_std=0.008):
-    """Генерация плоскости земли с микрорельефом."""
-    n = density
-    x = np.random.uniform(x_range[0], x_range[1], n)
-    y = np.random.uniform(y_range[0], y_range[1], n)
-    # микрорельеф: плавные волны + случайный шум
-    z = 0.015 * np.sin(2 * x) * np.cos(3 * y) + np.random.normal(0, noise_std, n)
-    return np.column_stack([x, y, z])
+parser = argparse.ArgumentParser(description='Анализ объёма растительного покрова TLS')
+parser.add_argument('--cloud', type=str,
+                   help='Путь к облаку точек (.npz, .las, .laz, .pcd, .ply, .xyz, .pts)')
+parser.add_argument('--save-cloud', type=str, help='Сохранить сгенерированное облако в .npz')
+args = parser.parse_args()
 
-
-def generate_wheat_plant(cx, cy, height=0.6, stem_radius=0.008,
-                         ear_length=0.08, ear_radius=0.012,
-                         points_stem=200, points_ear=150, points_leaves=120):
-    """
-    Генерация одного растения пшеницы:
-    - стебель: тонкий цилиндр с лёгким изгибом
-    - колос: эллипсоид на вершине
-    - листья: 2-4 изогнутые полоски
-    """
-    pts = []
-
-    # Стебель (цилиндр с лёгким изгибом)
-    t_stem = np.random.uniform(0, 1, points_stem)
-    z_stem = t_stem * height
-    # лёгкий изгиб стебля
-    bend_dir = np.random.uniform(0, 2 * np.pi)
-    bend_amount = np.random.uniform(0.005, 0.02)
-    theta = np.random.uniform(0, 2 * np.pi, points_stem)
-    x_stem = cx + stem_radius * np.cos(theta) + bend_amount * t_stem ** 2 * np.cos(bend_dir)
-    y_stem = cy + stem_radius * np.sin(theta) + bend_amount * t_stem ** 2 * np.sin(bend_dir)
-    pts.append(np.column_stack([x_stem, y_stem, z_stem]))
-
-    # Колос (эллипсоид)
-    top_x = cx + bend_amount * np.cos(bend_dir)
-    top_y = cy + bend_amount * np.sin(bend_dir)
-    theta_ear = np.random.uniform(0, 2 * np.pi, points_ear)
-    phi_ear = np.random.uniform(0, np.pi, points_ear)
-    x_ear = top_x + ear_radius * np.sin(phi_ear) * np.cos(theta_ear)
-    y_ear = top_y + ear_radius * np.sin(phi_ear) * np.sin(theta_ear)
-    z_ear = height + ear_length * np.cos(phi_ear)
-    pts.append(np.column_stack([x_ear, y_ear, z_ear]))
-
-    # Листья (2-4 изогнутых)
-    n_leaves = np.random.randint(2, 5)
-    for _ in range(n_leaves):
-        leaf_angle = np.random.uniform(0, 2 * np.pi)
-        leaf_start_z = np.random.uniform(0.1 * height, 0.65 * height)
-        leaf_length = np.random.uniform(0.08, 0.18)
-        n_lpts = points_leaves
-        t = np.sort(np.random.uniform(0, 1, n_lpts))
-        # изгиб листа: сначала вверх, потом вниз
-        x_leaf = cx + t * leaf_length * np.cos(leaf_angle)
-        y_leaf = cy + t * leaf_length * np.sin(leaf_angle)
-        z_leaf = leaf_start_z + t * 0.04 - t ** 2 * 0.08
-        # ширина листа меняется
-        width = 0.005 * (1 - 0.5 * t)
-        x_leaf += np.random.normal(0, width, n_lpts)
-        y_leaf += np.random.normal(0, width, n_lpts)
-        pts.append(np.column_stack([x_leaf, y_leaf, z_leaf]))
-
-    return np.vstack(pts)
-
-
-def generate_wheat_field(n_rows=5, plants_per_row=8, row_spacing=0.25,
-                         plant_spacing=0.12, height_mean=0.55, height_std=0.08):
-    """Генерация поля пшеницы: ряды растений."""
-    all_plants = []
-    plant_params = []
-
-    for row in range(n_rows):
-        cy = -((n_rows - 1) * row_spacing / 2) + row * row_spacing
-        for col in range(plants_per_row):
-            cx = -((plants_per_row - 1) * plant_spacing / 2) + col * plant_spacing
-            cx += np.random.normal(0, 0.012)
-            cy += np.random.normal(0, 0.012)
-            h = max(0.3, np.random.normal(height_mean, height_std))
-
-            plant = generate_wheat_plant(cx, cy, height=h)
-            all_plants.append(plant)
-
-            # ground truth объём
-            stem_vol = np.pi * 0.008 ** 2 * h
-            ear_vol = (4 / 3) * np.pi * 0.012 * 0.012 * 0.08
-            leaf_vol = 3 * 0.15 * 0.008 * 0.002
-            plant_params.append({
-                'cx': cx, 'cy': cy, 'height': h,
-                'volume': stem_vol + ear_vol + leaf_vol
-            })
-
-    return np.vstack(all_plants), plant_params
-
-
-def simulate_occlusion(points, scanner_pos=np.array([-2.5, 0, 0.5]),
-                       occlusion_strength=0.2):
-    """
-    Моделирование окклюзии TLS: точки, «загороженные» ближними объектами,
-    частично удаляются. Чем дальше точка от сканера и чем больше перед ней
-    других точек, тем выше вероятность удаления.
-    """
-    # Расстояние до сканера
-    dists = np.linalg.norm(points - scanner_pos, axis=1)
-    max_dist = dists.max()
-
-    # Вероятность удаления растёт с расстоянием
-    p_remove = occlusion_strength * (dists / max_dist) ** 1.5
-
-    # Точки выше земли и дальше от сканера — больше шанс окклюзии
-    above_ground = points[:, 2] > 0.03
-    p_remove[above_ground] *= 1.5
-    p_remove = np.clip(p_remove, 0, 0.7)
-
-    keep_mask = np.random.random(len(points)) > p_remove
-    return points[keep_mask], keep_mask
-
-
-def add_realistic_noise(points, noise_std=0.008, outlier_fraction=0.06,
-                        phantom_fraction=0.03):
-    """
-    Реалистичный шум TLS:
-    - Гауссов шум на координатах (ошибки дальномера)
-    - Случайные выбросы (6%)
-    - Фантомные отражения (мультипереотражения) — точки между объектами
-    """
-    n = len(points)
-
-    # 1. Гауссов шум
-    points = points + np.random.normal(0, noise_std, points.shape)
-
-    # 2. Случайные выбросы (далеко от объектов)
-    n_outliers = int(n * outlier_fraction)
-    outliers = np.random.uniform(
-        [points[:, 0].min() - 1.0, points[:, 1].min() - 1.0, -0.2],
-        [points[:, 0].max() + 1.0, points[:, 1].max() + 1.0, 1.2],
-        (n_outliers, 3)
-    )
-
-    # 3. Фантомные отражения (точки между землёй и растительностью)
-    n_phantoms = int(n * phantom_fraction)
-    phantom_idx = np.random.choice(n, n_phantoms)
-    phantoms = points[phantom_idx].copy()
-    # смещаем случайно, имитируя мультипереотражение
-    phantoms[:, 2] *= np.random.uniform(0.2, 0.8, n_phantoms)
-    phantoms[:, 0] += np.random.normal(0, 0.03, n_phantoms)
-    phantoms[:, 1] += np.random.normal(0, 0.03, n_phantoms)
-
-    return np.vstack([points, outliers, phantoms])
-
-
-# --- Генерация ---
 print("=" * 60)
-print("ГЕНЕРАЦИЯ СИНТЕТИЧЕСКОГО ОБЛАКА ТОЧЕК")
+print("ЗАГРУЗКА ОБЛАКА ТОЧЕК")
 print("=" * 60)
 
-ground_pts = generate_ground()
-vegetation_pts, plant_params = generate_wheat_field()
-total_gt_volume = sum(p['volume'] for p in plant_params)
+if args.cloud:
+    ext = Path(args.cloud).suffix.lower()
+    print(f"\nЗагрузка из {args.cloud}...")
 
-all_pts_clean = np.vstack([ground_pts, vegetation_pts])
+    if ext == '.npz':
+        data = load_cloud(args.cloud)
+    else:
+        data = load_real_cloud(args.cloud)
+        print("  (реальное облако, ground truth недоступен)")
+else:
+    print("\nГенерация нового облака...")
+    data = generate_full_cloud()
+    if args.save_cloud:
+        save_cloud(data, args.save_cloud)
+        print(f"Сохранено в {args.save_cloud}")
 
-# Окклюзия
-print("\nМоделирование окклюзии TLS...")
-scanner_pos = np.array([-2.5, 0, 0.5])
-all_pts_occluded, occ_mask = simulate_occlusion(all_pts_clean, scanner_pos, occlusion_strength=0.1)
-n_occluded = len(all_pts_clean) - len(all_pts_occluded)
-print(f"  Позиция сканера: {scanner_pos}")
-print(f"  Удалено окклюзией: {n_occluded} ({100 * n_occluded / len(all_pts_clean):.1f}%)")
-
-# Шум
-print("\nДобавление реалистичного шума...")
-all_pts_noisy = add_realistic_noise(all_pts_occluded, noise_std=0.005,
-                                     outlier_fraction=0.03, phantom_fraction=0.015)
+all_pts_noisy = data['all_pts_noisy']
+ground_pts = data['ground_pts']
+vegetation_pts = data['vegetation_pts']
+plant_params = data['plant_params']
+scanner_pos = data['scanner_pos']
+total_gt_volume = data['total_gt_volume']
 
 print(f"\n  Точек земли (исходно): {len(ground_pts)}")
 print(f"  Точек растительности (исходно): {len(vegetation_pts)}")
-print(f"  Точек после окклюзии: {len(all_pts_occluded)}")
 print(f"  Точек итого (с шумом): {len(all_pts_noisy)}")
 print(f"  Растений: {len(plant_params)}")
 print(f"  Ground truth объём: {total_gt_volume:.6f} м³")
