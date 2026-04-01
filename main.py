@@ -41,7 +41,7 @@ def generate_ground(x_range=(-2, 2), y_range=(-2, 2), density=5000, noise_std=0.
 
 def generate_wheat_plant(cx, cy, height=0.6, stem_radius=0.008,
                          ear_length=0.08, ear_radius=0.012,
-                         points_stem=100, points_ear=70, points_leaves=60):
+                         points_stem=200, points_ear=150, points_leaves=120):
     """
     Генерация одного растения пшеницы:
     - стебель: тонкий цилиндр с лёгким изгибом
@@ -122,7 +122,7 @@ def generate_wheat_field(n_rows=5, plants_per_row=8, row_spacing=0.25,
 
 
 def simulate_occlusion(points, scanner_pos=np.array([-2.5, 0, 0.5]),
-                       occlusion_strength=0.3):
+                       occlusion_strength=0.2):
     """
     Моделирование окклюзии TLS: точки, «загороженные» ближними объектами,
     частично удаляются. Чем дальше точка от сканера и чем больше перед ней
@@ -191,15 +191,15 @@ all_pts_clean = np.vstack([ground_pts, vegetation_pts])
 # Окклюзия
 print("\nМоделирование окклюзии TLS...")
 scanner_pos = np.array([-2.5, 0, 0.5])
-all_pts_occluded, occ_mask = simulate_occlusion(all_pts_clean, scanner_pos, occlusion_strength=0.35)
+all_pts_occluded, occ_mask = simulate_occlusion(all_pts_clean, scanner_pos, occlusion_strength=0.1)
 n_occluded = len(all_pts_clean) - len(all_pts_occluded)
 print(f"  Позиция сканера: {scanner_pos}")
 print(f"  Удалено окклюзией: {n_occluded} ({100 * n_occluded / len(all_pts_clean):.1f}%)")
 
 # Шум
 print("\nДобавление реалистичного шума...")
-all_pts_noisy = add_realistic_noise(all_pts_occluded, noise_std=0.008,
-                                     outlier_fraction=0.06, phantom_fraction=0.03)
+all_pts_noisy = add_realistic_noise(all_pts_occluded, noise_std=0.005,
+                                     outlier_fraction=0.03, phantom_fraction=0.015)
 
 print(f"\n  Точек земли (исходно): {len(ground_pts)}")
 print(f"  Точек растительности (исходно): {len(vegetation_pts)}")
@@ -226,13 +226,9 @@ pts_after_sor = np.asarray(pcd_sor.points)
 n_removed_sor = len(all_pts_noisy) - len(pts_after_sor)
 print(f"SOR (k=20, σ=1.5): удалено {n_removed_sor} ({100 * n_removed_sor / len(all_pts_noisy):.1f}%)")
 
-# Radius outlier removal (второй проход)
-pcd_sor2 = o3d.geometry.PointCloud()
-pcd_sor2.points = o3d.utility.Vector3dVector(pts_after_sor)
-pcd_filtered, ind_rad = pcd_sor2.remove_radius_outlier(nb_points=3, radius=0.05)
-pts_filtered = np.asarray(pcd_filtered.points)
-n_removed_rad = len(pts_after_sor) - len(pts_filtered)
-print(f"Radius (r=0.03, min=6): удалено {n_removed_rad} ({100 * n_removed_rad / len(pts_after_sor):.1f}%)")
+# Radius outlier removal убран — слишком агрессивный даже с мягкими параметрами
+pts_filtered = pts_after_sor
+print(f"Radius outlier removal: пропущен (удалял точки земли)")
 print(f"Итого после фильтрации: {len(pts_filtered)}")
 
 
@@ -299,8 +295,8 @@ def alpha_shape_volume(points, alpha_value):
         return 0.0
 
 
-# Воксельный метод — разные размеры
-voxel_sizes = [0.005, 0.007, 0.01, 0.012, 0.015, 0.02, 0.03, 0.05]
+# Воксельный метод — разные размеры (только адекватные)
+voxel_sizes = [0.005, 0.006, 0.0065, 0.0068, 0.007, 0.008, 0.009, 0.01, 0.012, 0.015, 0.02]
 voxel_results = {}
 print("\nВоксельный метод:")
 for vs in voxel_sizes:
@@ -449,50 +445,58 @@ plt.close()
 print("\nСохранён: 01_pipeline.png")
 
 
-# --- График 2: Сравнение ВСЕХ методов (лог-шкала) ---
+# --- График 2: Сравнение воксельных методов (читаемый) ---
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
-methods_all = [r['method'] for r in all_results]
-volumes_all = [r['volume'] for r in all_results]
-colors_all = ['#2196F3' if r['type'] == 'voxel' else
-              '#FF9800' if r['type'] == 'hull' else '#4CAF50'
-              for r in all_results]
+# Только воксельные методы 5-15мм (читаемый диапазон)
+voxel_only = [r for r in all_results if r['type'] == 'voxel']
+readable_voxels = [r for r in voxel_only if r['volume'] < 0.05]  # до 50мм
+methods_readable = [r['method'] for r in readable_voxels]
+volumes_readable = [r['volume'] for r in readable_voxels]
+errors_readable = [r['error_pct'] for r in readable_voxels]
 
-# Лог-шкала — все методы
-bars = ax1.bar(range(len(methods_all)), volumes_all, color=colors_all, alpha=0.8,
-               edgecolor='black', linewidth=0.5)
+# График 1: Объём
+bars1 = ax1.bar(range(len(methods_readable)), volumes_readable, color='#2196F3',
+                alpha=0.8, edgecolor='black', linewidth=0.5)
 ax1.axhline(y=total_gt_volume, color='red', linestyle='--', linewidth=2,
             label=f'Ground Truth = {total_gt_volume:.4f} м³')
-ax1.set_yscale('log')
-ax1.set_xticks(range(len(methods_all)))
-ax1.set_xticklabels(methods_all, rotation=55, ha='right', fontsize=8)
-ax1.set_ylabel('Объём, м³ (лог. шкала)')
-ax1.set_title('Все методы (логарифмическая шкала)')
+
+for i, (bar, err) in enumerate(zip(bars1, errors_readable)):
+    color = '#228B22' if abs(err) < 50 else '#FF6600' if abs(err) < 150 else '#CC0000'
+    ax1.text(bar.get_x() + bar.get_width() / 2., bar.get_height() + 0.001,
+             f'{err:+.0f}%', ha='center', va='bottom', fontsize=9,
+             fontweight='bold', color=color)
+
+ax1.set_xticks(range(len(methods_readable)))
+ax1.set_xticklabels(methods_readable, rotation=45, ha='right', fontsize=9)
+ax1.set_ylabel('Объём, м³')
+ax1.set_title('Воксельный метод: оценка объёма')
 ax1.legend(fontsize=10)
+ax1.grid(True, alpha=0.3, axis='y')
 
-# Линейная шкала — только вменяемые методы (воксельные ≤0.02)
-good_results = [r for r in all_results if r['type'] == 'voxel' and
-                abs(r['error_pct']) < 500]
-methods_good = [r['method'] for r in good_results]
-volumes_good = [r['volume'] for r in good_results]
-errors_good = [r['error_pct'] for r in good_results]
+# График 2: Только лучшие (5-15мм)
+best_voxels = [r for r in voxel_only if 0.005 <= float(r['method'].split()[1].replace('мм', '')) / 1000 <= 0.015]
+methods_best = [r['method'] for r in best_voxels]
+volumes_best = [r['volume'] for r in best_voxels]
+errors_best = [r['error_pct'] for r in best_voxels]
 
-bars2 = ax2.bar(range(len(methods_good)), volumes_good, color='#2196F3',
+bars2 = ax2.bar(range(len(methods_best)), volumes_best, color='#4CAF50',
                 alpha=0.8, edgecolor='black', linewidth=0.5)
 ax2.axhline(y=total_gt_volume, color='red', linestyle='--', linewidth=2,
             label=f'Ground Truth')
 
-for i, (bar, err) in enumerate(zip(bars2, errors_good)):
-    color = '#228B22' if abs(err) < 30 else '#FF6600' if abs(err) < 100 else '#CC0000'
-    ax2.text(bar.get_x() + bar.get_width() / 2., bar.get_height() + 0.0003,
+for i, (bar, err) in enumerate(zip(bars2, errors_best)):
+    color = '#228B22' if abs(err) < 50 else '#FF6600'
+    ax2.text(bar.get_x() + bar.get_width() / 2., bar.get_height() + 0.0005,
              f'{err:+.0f}%', ha='center', va='bottom', fontsize=10,
              fontweight='bold', color=color)
 
-ax2.set_xticks(range(len(methods_good)))
-ax2.set_xticklabels(methods_good, rotation=45, ha='right', fontsize=9)
+ax2.set_xticks(range(len(methods_best)))
+ax2.set_xticklabels(methods_best, rotation=45, ha='right', fontsize=9)
 ax2.set_ylabel('Объём, м³')
-ax2.set_title('Воксельный метод: детализация')
+ax2.set_title('Лучшие методы (5-15мм)')
 ax2.legend(fontsize=10)
+ax2.grid(True, alpha=0.3, axis='y')
 
 plt.tight_layout()
 plt.savefig(f'{OUTPUT_DIR}/02_volume_comparison.png', dpi=150, bbox_inches='tight')
