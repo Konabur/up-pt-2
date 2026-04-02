@@ -69,6 +69,10 @@ all_pts_clean = data.get('all_pts_clean', all_pts_noisy)
 all_pts_occluded = data.get('all_pts_occluded', all_pts_noisy)
 n_occluded = max(0, len(all_pts_clean) - len(all_pts_occluded))
 
+# Сохранить облако в results/
+save_cloud(data, f'{OUTPUT_DIR}/cloud.npz')
+print(f"Облако сохранено в {OUTPUT_DIR}/cloud.npz")
+
 print(f"\n  Точек земли (исходно): {len(ground_pts)}")
 print(f"  Точек растительности (исходно): {len(vegetation_pts)}")
 print(f"  Точек итого (с шумом): {len(all_pts_noisy)}")
