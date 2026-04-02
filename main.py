@@ -205,7 +205,7 @@ all_results = []
 
 for vs in voxel_sizes:
     r = voxel_results[vs]
-    label = f"Voxel {vs*1000:.0f}мм"
+    label = f"Voxel {vs*1000:.1f}мм"
     note = "✓ лучший" if abs(r['error_pct']) == min(abs(voxel_results[v]['error_pct']) for v in voxel_sizes) else ""
     print(f"{label:<30} {r['volume']:<14.6f} {r['error_pct']:+13.1f}% {note}")
     all_results.append({'method': label, 'volume': r['volume'],
@@ -312,58 +312,61 @@ plt.close()
 print("\nСохранён: 01_pipeline.png")
 
 
-# --- График 2: Сравнение воксельных методов (читаемый) ---
+# --- График 2: Сравнение воксельных методов ---
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
 
-# Только воксельные методы 5-15мм (читаемый диапазон)
+# Только воксельные методы 5-15мм (лучшие)
 voxel_only = [r for r in all_results if r['type'] == 'voxel']
-readable_voxels = [r for r in voxel_only if r['volume'] < 0.05]  # до 50мм
-methods_readable = [r['method'] for r in readable_voxels]
-volumes_readable = [r['volume'] for r in readable_voxels]
-errors_readable = [r['error_pct'] for r in readable_voxels]
-
-# График 1: Объём
-bars1 = ax1.bar(range(len(methods_readable)), volumes_readable, color='#2196F3',
-                alpha=0.8, edgecolor='black', linewidth=0.5)
-ax1.axhline(y=total_gt_volume, color='red', linestyle='--', linewidth=2,
-            label=f'Ground Truth = {total_gt_volume:.4f} м³')
-
-for i, (bar, err) in enumerate(zip(bars1, errors_readable)):
-    color = '#228B22' if abs(err) < 50 else '#FF6600' if abs(err) < 150 else '#CC0000'
-    ax1.text(bar.get_x() + bar.get_width() / 2., bar.get_height() + 0.001,
-             f'{err:+.0f}%', ha='center', va='bottom', fontsize=9,
-             fontweight='bold', color=color)
-
-ax1.set_xticks(range(len(methods_readable)))
-ax1.set_xticklabels(methods_readable, rotation=45, ha='right', fontsize=9)
-ax1.set_ylabel('Объём, м³')
-ax1.set_title('Воксельный метод: оценка объёма')
-ax1.legend(fontsize=10)
-ax1.grid(True, alpha=0.3, axis='y')
-
-# График 2: Только лучшие (5-15мм)
 best_voxels = [r for r in voxel_only if 0.005 <= float(r['method'].split()[1].replace('мм', '')) / 1000 <= 0.015]
 methods_best = [r['method'] for r in best_voxels]
 volumes_best = [r['volume'] for r in best_voxels]
 errors_best = [r['error_pct'] for r in best_voxels]
 
-bars2 = ax2.bar(range(len(methods_best)), volumes_best, color='#4CAF50',
+# График 1: Лучшие методы (5-15мм)
+bars1 = ax1.bar(range(len(methods_best)), volumes_best, color='#2196F3',
                 alpha=0.8, edgecolor='black', linewidth=0.5)
-ax2.axhline(y=total_gt_volume, color='red', linestyle='--', linewidth=2,
-            label=f'Ground Truth')
+ax1.axhline(y=total_gt_volume, color='red', linestyle='--', linewidth=2,
+            label=f'Ground Truth = {total_gt_volume:.4f} м³')
 
-for i, (bar, err) in enumerate(zip(bars2, errors_best)):
-    color = '#228B22' if abs(err) < 50 else '#FF6600'
-    ax2.text(bar.get_x() + bar.get_width() / 2., bar.get_height() + 0.0005,
-             f'{err:+.0f}%', ha='center', va='bottom', fontsize=10,
+for i, (bar, err) in enumerate(zip(bars1, errors_best)):
+    color = '#228B22' if abs(err) < 50 else '#FF6600' if abs(err) < 150 else '#CC0000'
+    ax1.text(bar.get_x() + bar.get_width() / 2., bar.get_height() + 0.0005,
+             f'{err:+.0f}%', ha='center', va='bottom', fontsize=9,
              fontweight='bold', color=color)
 
-ax2.set_xticks(range(len(methods_best)))
-ax2.set_xticklabels(methods_best, rotation=45, ha='right', fontsize=9)
-ax2.set_ylabel('Объём, м³')
-ax2.set_title('Лучшие методы (5-15мм)')
-ax2.legend(fontsize=10)
-ax2.grid(True, alpha=0.3, axis='y')
+ax1.set_xticks(range(len(methods_best)))
+ax1.set_xticklabels(methods_best, rotation=45, ha='right', fontsize=9)
+ax1.set_ylabel('Объём, м³')
+ax1.set_title('Лучшие воксельные методы (5-15мм)')
+ax1.legend(fontsize=10)
+ax1.grid(True, alpha=0.3, axis='y')
+
+# График 2: Trade-off точность vs производительность (все размеры)
+vs_list = sorted(voxel_results.keys())
+n_voxels_list = [voxel_results[v]['n_voxels'] for v in vs_list]
+abs_errors_list = [abs(voxel_results[v]['error_pct']) for v in vs_list]
+vs_mm_list = [v * 1000 for v in vs_list]
+
+# Цвет по размеру вокселя
+colors = plt.cm.viridis(np.linspace(0, 1, len(vs_list)))
+scatter = ax2.scatter(n_voxels_list, abs_errors_list, s=100, c=colors,
+                     alpha=0.7, edgecolor='black', linewidth=1)
+
+# Аннотации для всех точек
+for i, (vs, n_vox, err) in enumerate(zip(vs_list, n_voxels_list, abs_errors_list)):
+    ax2.annotate(f'{vs*1000:.1f}мм',
+                xy=(n_vox, err), xytext=(5, 5),
+                textcoords='offset points', fontsize=8,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.3))
+
+ax2.set_xlabel('Количество вокселей')
+ax2.set_ylabel('|Ошибка|, %')
+ax2.set_title('Точность vs Вычислительная нагрузка')
+ax2.set_xscale('log')
+ax2.set_yscale('log')
+ax2.grid(True, alpha=0.3, which='both')
+ax2.axhline(y=20, color='green', linestyle=':', alpha=0.5, label='20% порог')
+ax2.legend(fontsize=9)
 
 plt.tight_layout()
 plt.savefig(f'{OUTPUT_DIR}/02_volume_comparison.png', dpi=150, bbox_inches='tight')
@@ -428,7 +431,7 @@ method_colors = []
 
 # Лучший воксельный
 best_vs = min(voxel_results, key=lambda v: abs(voxel_results[v]['error_pct']))
-method_names.append(f'Voxel {best_vs*1000:.0f}мм')
+method_names.append(f'Voxel {best_vs*1000:.1f}мм')
 method_volumes.append(voxel_results[best_vs]['volume'])
 method_colors.append('#2196F3')
 
@@ -591,4 +594,4 @@ print("\nСохранён: results.json")
 print("\n" + "=" * 60)
 print("ЭКСПЕРИМЕНТ ЗАВЕРШЁН")
 print("=" * 60)
-print(f"\nЛучший метод: Voxel {best_vs*1000:.0f}мм, ошибка {abs(voxel_results[best_vs]['error_pct']):.1f}%")
+print(f"\nЛучший метод: Voxel {best_vs*1000:.1f}мм, ошибка {abs(voxel_results[best_vs]['error_pct']):.1f}%")
