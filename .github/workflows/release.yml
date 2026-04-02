@@ -26,6 +26,9 @@ jobs:
       - name: Run experiment
         run: uv run main.py
 
+      - name: Create results archive
+        run: zip -r results.zip results/
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -33,8 +36,17 @@ jobs:
             results/*.png
             results/*.html
             results/*.json
+            results/*.npz
+            results.zip
           body: |
             Эксперимент ${{ github.ref_name }}
 
             Результаты анализа объёма растительного покрова TLS.
+
+            **Файлы:**
+            - `results.zip` - архив со всеми результатами (графики, 3D визуализация, данные, облако точек)
+            - `*.png` - графики анализа
+            - `*.html` - интерактивная 3D визуализация
+            - `results.json` - метрики эксперимента
+            - `cloud.npz` - облако точек
           fail_on_unmatched_files: true
