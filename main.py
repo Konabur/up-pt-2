@@ -20,28 +20,41 @@ import json
 import os
 import argparse
 from pathlib import Path
+from dotenv import load_dotenv
 from generate_cloud import generate_full_cloud, load_cloud, save_cloud, load_real_cloud
 
-OUTPUT_DIR = "results"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# Дефолтный размер вокселя для случая без GT (эмпирически оптимальный для пшеницы)
-DEFAULT_VOXEL_SIZE_NO_GT = 0.007  # м (7мм)
-
+# Загрузка переменных окружения из .env (override=True - перезаписывать существующие)
+load_dotenv(override=True)
 
 # ============================================================
 # 1. ЗАГРУЗКА ИЛИ ГЕНЕРАЦИЯ ОБЛАКА ТОЧЕК
 # ============================================================
 
 parser = argparse.ArgumentParser(description='Анализ объёма растительного покрова TLS')
-parser.add_argument('--cloud', type=str,
+parser.add_argument('--cloud', type=str, default=os.getenv('TPCVE_CLOUD'),
                    help='Путь к облаку точек (.npz, .las, .laz, .pcd, .ply, .xyz, .pts)')
-parser.add_argument('--save-cloud', type=str, help='Сохранить сгенерированное облако в .npz')
+parser.add_argument('--save-cloud', type=str, default=os.getenv('TPCVE_SAVE_CLOUD'),
+                   help='Сохранить сгенерированное облако в .npz')
 parser.add_argument('--gt-volume', type=float,
+                   default=float(os.getenv('TPCVE_GT_VOLUME', '0')) or None,
                    help='Ground truth объём (м³) для реальных облаков')
-parser.add_argument('--units', type=str, default='auto', choices=['auto', 'm', 'cm', 'mm'],
+parser.add_argument('--units', type=str, default=os.getenv('TPCVE_UNITS', 'auto'),
+                   choices=['auto', 'm', 'cm', 'mm'],
                    help='Единицы измерения координат (auto=автоопределение, m=метры, cm=сантиметры, mm=миллиметры)')
+parser.add_argument('--output-dir', type=str, default=os.getenv('TPCVE_OUTPUT_DIR', 'results'),
+                   help='Папка для сохранения результатов')
+parser.add_argument('--default-voxel-size', type=float,
+                   default=float(os.getenv('TPCVE_DEFAULT_VOXEL_SIZE', '0.007')),
+                   help='Дефолтный размер вокселя (м) для случая без GT')
+parser.add_argument('--skip-hull-methods', action='store_true',
+                   default=os.getenv('TPCVE_SKIP_HULL_METHODS', '').lower() in ('1', 'true', 'yes'),
+                   help='Пропустить Convex Hull и Alpha Shape (ускорение)')
 args = parser.parse_args()
+
+OUTPUT_DIR = args.output_dir
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+DEFAULT_VOXEL_SIZE_NO_GT = args.default_voxel_size
 
 print("=" * 60)
 print("ЗАГРУЗКА ОБЛАКА ТОЧЕК")
@@ -198,31 +211,38 @@ for vs in voxel_sizes:
         voxel_results[vs] = {'volume': vol, 'n_voxels': n_vox, 'error_pct': None}
         print(f"  size={vs:.3f} м: V={vol:.6f} м³, вокселей={n_vox}")
 
-# Convex Hull
-ch_volume = convex_hull_volume(vegetation_classified)
-if has_gt:
-    ch_error = (ch_volume - total_gt_volume) / total_gt_volume * 100
-    print(f"\nConvex Hull: V={ch_volume:.6f} м³, ошибка={ch_error:+.1f}%")
-else:
+# Convex Hull и Alpha Shape (опционально)
+if args.skip_hull_methods:
+    print("\nConvex Hull и Alpha Shape: пропущены (--skip-hull-methods)")
+    ch_volume = 0.0
     ch_error = None
-    print(f"\nConvex Hull: V={ch_volume:.6f} м³")
-
-# Alpha Shape
-alpha_values = [1.0, 5.0, 10.0, 20.0, 50.0]
-alpha_results = {}
-print("\nAlpha Shape:")
-for av in alpha_values:
-    vol = alpha_shape_volume(vegetation_classified, av)
-    if vol > 0:
-        if has_gt:
-            err = (vol - total_gt_volume) / total_gt_volume * 100
-            alpha_results[av] = {'volume': vol, 'error_pct': err}
-            print(f"  α={av}: V={vol:.6f} м³, ошибка={err:+.1f}%")
-        else:
-            alpha_results[av] = {'volume': vol, 'error_pct': None}
-            print(f"  α={av}: V={vol:.6f} м³")
+    alpha_results = {}
+else:
+    # Convex Hull
+    ch_volume = convex_hull_volume(vegetation_classified)
+    if has_gt:
+        ch_error = (ch_volume - total_gt_volume) / total_gt_volume * 100
+        print(f"\nConvex Hull: V={ch_volume:.6f} м³, ошибка={ch_error:+.1f}%")
     else:
-        print(f"  α={av}: не удалось вычислить")
+        ch_error = None
+        print(f"\nConvex Hull: V={ch_volume:.6f} м³")
+
+    # Alpha Shape
+    alpha_values = [1.0, 5.0, 10.0, 20.0, 50.0]
+    alpha_results = {}
+    print("\nAlpha Shape:")
+    for av in alpha_values:
+        vol = alpha_shape_volume(vegetation_classified, av)
+        if vol > 0:
+            if has_gt:
+                err = (vol - total_gt_volume) / total_gt_volume * 100
+                alpha_results[av] = {'volume': vol, 'error_pct': err}
+                print(f"  α={av}: V={vol:.6f} м³, ошибка={err:+.1f}%")
+            else:
+                alpha_results[av] = {'volume': vol, 'error_pct': None}
+                print(f"  α={av}: V={vol:.6f} м³")
+        else:
+            print(f"  α={av}: не удалось вычислить")
 
 
 # ============================================================
@@ -253,24 +273,25 @@ for vs in voxel_sizes:
     all_results.append({'method': label, 'volume': r['volume'],
                         'error_pct': r['error_pct'], 'type': 'voxel'})
 
-if has_gt:
-    print("-" * 70)
-    print(f"{'Convex Hull':<30} {ch_volume:<14.6f} {ch_error:+13.1f}% завышает (оболочка)")
-else:
-    print("-" * 50)
-    print(f"{'Convex Hull':<30} {ch_volume:<14.6f}")
-all_results.append({'method': 'Convex Hull', 'volume': ch_volume,
-                    'error_pct': ch_error, 'type': 'hull'})
-
-for av in sorted(alpha_results.keys()):
-    r = alpha_results[av]
-    label = f"Alpha Shape α={av}"
+if not args.skip_hull_methods:
     if has_gt:
-        print(f"{label:<30} {r['volume']:<14.6f} {r['error_pct']:+13.1f}%")
+        print("-" * 70)
+        print(f"{'Convex Hull':<30} {ch_volume:<14.6f} {ch_error:+13.1f}% завышает (оболочка)")
     else:
-        print(f"{label:<30} {r['volume']:<14.6f}")
-    all_results.append({'method': label, 'volume': r['volume'],
-                        'error_pct': r['error_pct'], 'type': 'alpha'})
+        print("-" * 50)
+        print(f"{'Convex Hull':<30} {ch_volume:<14.6f}")
+    all_results.append({'method': 'Convex Hull', 'volume': ch_volume,
+                        'error_pct': ch_error, 'type': 'hull'})
+
+    for av in sorted(alpha_results.keys()):
+        r = alpha_results[av]
+        label = f"Alpha Shape α={av}"
+        if has_gt:
+            print(f"{label:<30} {r['volume']:<14.6f} {r['error_pct']:+13.1f}%")
+        else:
+            print(f"{label:<30} {r['volume']:<14.6f}")
+        all_results.append({'method': label, 'volume': r['volume'],
+                            'error_pct': r['error_pct'], 'type': 'alpha'})
 
 if has_gt:
     print("=" * 70)
@@ -510,73 +531,75 @@ print("Сохранён: 03_voxel_analysis.png")
 
 
 # --- График 4: Почему Convex Hull / Alpha Shape не работают ---
-fig, ax = plt.subplots(figsize=(10, 6))
+if not args.skip_hull_methods:
+    fig, ax = plt.subplots(figsize=(10, 6))
 
-method_names = []
-method_volumes = []
-method_colors = []
+    method_names = []
+    method_volumes = []
+    method_colors = []
 
-# Лучший воксельный
-if has_gt:
-    best_vs = min(voxel_results, key=lambda v: abs(voxel_results[v]['error_pct']))
+    # Лучший воксельный
+    if has_gt:
+        best_vs = min(voxel_results, key=lambda v: abs(voxel_results[v]['error_pct']))
+    else:
+        best_vs = DEFAULT_VOXEL_SIZE_NO_GT
+
+    method_names.append(f'Voxel {best_vs*1000:.1f}мм')
+    method_volumes.append(voxel_results[best_vs]['volume'])
+    method_colors.append('#2196F3')
+
+    # Convex Hull
+    method_names.append('Convex Hull')
+    method_volumes.append(ch_volume)
+    method_colors.append('#FF9800')
+
+    # Alpha shapes
+    for av in sorted(alpha_results.keys()):
+        method_names.append(f'α-shape α={av}')
+        method_volumes.append(alpha_results[av]['volume'])
+        method_colors.append('#4CAF50')
+
+    if has_gt:
+        method_names.append('Ground Truth')
+        method_volumes.append(total_gt_volume)
+        method_colors.append('#f44336')
+
+    bars = ax.barh(range(len(method_names)), method_volumes, color=method_colors,
+                   alpha=0.8, edgecolor='black', linewidth=0.5)
+
+    if has_gt:
+        ax.axvline(x=total_gt_volume, color='red', linestyle='--', linewidth=2)
+
+        for i, (bar, vol) in enumerate(zip(bars, method_volumes)):
+            if vol > 0.1:
+                ratio = vol / total_gt_volume
+                ax.text(vol + 0.02, bar.get_y() + bar.get_height() / 2,
+                        f'×{ratio:.0f}', va='center', fontsize=10, fontweight='bold')
+
+        ax.set_xlabel('Объём, м³')
+        ax.set_title('Convex Hull и Alpha Shape завышают объём\n'
+                     '(считают оболочку, а не тонкие структуры растений)')
+        ax.set_xscale('log')
+    else:
+        # Без GT просто показываем сравнение объёмов
+        for i, (bar, vol) in enumerate(zip(bars, method_volumes)):
+            ax.text(vol * 1.05, bar.get_y() + bar.get_height() / 2,
+                    f'{vol:.4f} м³', va='center', fontsize=9)
+
+        ax.set_xlabel('Объём, м³')
+        ax.set_title('Сравнение методов оценки объёма')
+        ax.set_xscale('log')
+
+    ax.set_yticks(range(len(method_names)))
+    ax.set_yticklabels(method_names, fontsize=10)
+    ax.grid(True, alpha=0.3, axis='x')
+
+    plt.tight_layout()
+    plt.savefig(f'{OUTPUT_DIR}/04_hull_vs_voxel.png', dpi=150, bbox_inches='tight')
+    plt.close()
+    print("Сохранён: 04_hull_vs_voxel.png")
 else:
-    # Без GT берём средний размер вокселя
-    best_vs = 0.007
-
-method_names.append(f'Voxel {best_vs*1000:.1f}мм')
-method_volumes.append(voxel_results[best_vs]['volume'])
-method_colors.append('#2196F3')
-
-# Convex Hull
-method_names.append('Convex Hull')
-method_volumes.append(ch_volume)
-method_colors.append('#FF9800')
-
-# Alpha shapes
-for av in sorted(alpha_results.keys()):
-    method_names.append(f'α-shape α={av}')
-    method_volumes.append(alpha_results[av]['volume'])
-    method_colors.append('#4CAF50')
-
-if has_gt:
-    method_names.append('Ground Truth')
-    method_volumes.append(total_gt_volume)
-    method_colors.append('#f44336')
-
-bars = ax.barh(range(len(method_names)), method_volumes, color=method_colors,
-               alpha=0.8, edgecolor='black', linewidth=0.5)
-
-if has_gt:
-    ax.axvline(x=total_gt_volume, color='red', linestyle='--', linewidth=2)
-
-    for i, (bar, vol) in enumerate(zip(bars, method_volumes)):
-        if vol > 0.1:
-            ratio = vol / total_gt_volume
-            ax.text(vol + 0.02, bar.get_y() + bar.get_height() / 2,
-                    f'×{ratio:.0f}', va='center', fontsize=10, fontweight='bold')
-
-    ax.set_xlabel('Объём, м³')
-    ax.set_title('Convex Hull и Alpha Shape завышают объём\n'
-                 '(считают оболочку, а не тонкие структуры растений)')
-    ax.set_xscale('log')
-else:
-    # Без GT просто показываем сравнение объёмов
-    for i, (bar, vol) in enumerate(zip(bars, method_volumes)):
-        ax.text(vol * 1.05, bar.get_y() + bar.get_height() / 2,
-                f'{vol:.4f} м³', va='center', fontsize=9)
-
-    ax.set_xlabel('Объём, м³')
-    ax.set_title('Сравнение методов оценки объёма')
-    ax.set_xscale('log')
-
-ax.set_yticks(range(len(method_names)))
-ax.set_yticklabels(method_names, fontsize=10)
-ax.grid(True, alpha=0.3, axis='x')
-
-plt.tight_layout()
-plt.savefig(f'{OUTPUT_DIR}/04_hull_vs_voxel.png', dpi=150, bbox_inches='tight')
-plt.close()
-print("Сохранён: 04_hull_vs_voxel.png")
+    print("График 04 пропущен (--skip-hull-methods)")
 
 
 # ============================================================
