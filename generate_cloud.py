@@ -209,7 +209,50 @@ def load_cloud(filepath):
     }
 
 
-def load_real_cloud(filepath):
+def detect_units(points):
+    """
+    Автоопределение единиц измерения облака точек.
+
+    Returns:
+        str: 'm', 'cm', или 'mm'
+    """
+    if len(points) == 0:
+        return 'm'
+
+    ranges = points.max(axis=0) - points.min(axis=0)
+    max_range = ranges.max()
+
+    # Вычисляем среднее расстояние до ближайшего соседа (выборка)
+    sample_size = min(1000, len(points))
+    sample_idx = np.random.choice(len(points), sample_size, replace=False)
+    sample_points = points[sample_idx]
+
+    # Простая эвристика: расстояние до ближайшего из 10 случайных точек
+    avg_nearest = []
+    for i in range(min(100, len(sample_points))):
+        dists = np.linalg.norm(sample_points - sample_points[i], axis=1)
+        dists = dists[dists > 0]  # исключаем саму точку
+        if len(dists) > 0:
+            avg_nearest.append(dists.min())
+
+    avg_dist = np.mean(avg_nearest) if avg_nearest else max_range / 100
+
+    # Эвристика определения единиц
+    if max_range < 10:
+        # Поле меньше 10 единиц - скорее всего метры
+        return 'm'
+    elif max_range > 100 and avg_dist > 10:
+        # Большой масштаб и большие расстояния между точками - миллиметры
+        return 'mm'
+    elif max_range > 100:
+        # Большой масштаб, но малые расстояния - сантиметры
+        return 'cm'
+    else:
+        # Промежуточный случай - сантиметры
+        return 'cm'
+
+
+def load_real_cloud(filepath, units='auto'):
     """
     Загрузка реального облака точек из различных форматов.
 
@@ -217,14 +260,19 @@ def load_real_cloud(filepath):
     - PCD, PLY, XYZ, PTS (через Open3D)
     - LAS, LAZ (через laspy, если установлен)
 
+    Args:
+        filepath: путь к файлу
+        units: 'auto', 'm', 'cm', или 'mm' - единицы измерения координат
+
     Returns:
         dict: {
-            'all_pts_noisy': облако точек (N, 3),
+            'all_pts_noisy': облако точек (N, 3) в метрах,
             'ground_pts': пустой массив,
             'vegetation_pts': пустой массив,
             'plant_params': [],
             'scanner_pos': np.array([0, 0, 0]),
-            'total_gt_volume': 0.0
+            'total_gt_volume': 0.0,
+            'units_detected': str (если units='auto')
         }
     """
     import open3d as o3d
@@ -249,7 +297,25 @@ def load_real_cloud(filepath):
     else:
         raise ValueError(f"Неподдерживаемый формат: {ext}")
 
-    return {
+    # Определение и конвертация единиц
+    if units == 'auto':
+        detected_units = detect_units(points)
+        print(f"  Автоопределение единиц: {detected_units}")
+    else:
+        detected_units = units
+        print(f"  Используются указанные единицы: {units}")
+
+    # Конвертация в метры
+    if detected_units == 'mm':
+        points = points / 1000.0
+        print(f"  Координаты конвертированы: мм → м (÷1000)")
+    elif detected_units == 'cm':
+        points = points / 100.0
+        print(f"  Координаты конвертированы: см → м (÷100)")
+    elif detected_units == 'm':
+        print(f"  Координаты уже в метрах")
+
+    result = {
         'all_pts_noisy': points,
         'ground_pts': np.array([]),
         'vegetation_pts': np.array([]),
@@ -257,6 +323,11 @@ def load_real_cloud(filepath):
         'scanner_pos': np.array([0.0, 0.0, 0.0]),
         'total_gt_volume': 0.0
     }
+
+    if units == 'auto':
+        result['units_detected'] = detected_units
+
+    return result
 
 
 if __name__ == '__main__':

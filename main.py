@@ -25,6 +25,9 @@ from generate_cloud import generate_full_cloud, load_cloud, save_cloud, load_rea
 OUTPUT_DIR = "results"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# Дефолтный размер вокселя для случая без GT (эмпирически оптимальный для пшеницы)
+DEFAULT_VOXEL_SIZE_NO_GT = 0.007  # м (7мм)
+
 
 # ============================================================
 # 1. ЗАГРУЗКА ИЛИ ГЕНЕРАЦИЯ ОБЛАКА ТОЧЕК
@@ -34,6 +37,10 @@ parser = argparse.ArgumentParser(description='Анализ объёма раст
 parser.add_argument('--cloud', type=str,
                    help='Путь к облаку точек (.npz, .las, .laz, .pcd, .ply, .xyz, .pts)')
 parser.add_argument('--save-cloud', type=str, help='Сохранить сгенерированное облако в .npz')
+parser.add_argument('--gt-volume', type=float,
+                   help='Ground truth объём (м³) для реальных облаков')
+parser.add_argument('--units', type=str, default='auto', choices=['auto', 'm', 'cm', 'mm'],
+                   help='Единицы измерения координат (auto=автоопределение, m=метры, cm=сантиметры, mm=миллиметры)')
 args = parser.parse_args()
 
 print("=" * 60)
@@ -47,7 +54,7 @@ if args.cloud:
     if ext == '.npz':
         data = load_cloud(args.cloud)
     else:
-        data = load_real_cloud(args.cloud)
+        data = load_real_cloud(args.cloud, units=args.units)
         print("  (реальное облако, ground truth недоступен)")
 else:
     print("\nГенерация нового облака...")
@@ -63,6 +70,14 @@ plant_params = data['plant_params']
 scanner_pos = data['scanner_pos']
 total_gt_volume = data['total_gt_volume']
 
+# Применить переданный GT если указан
+if args.gt_volume is not None:
+    total_gt_volume = args.gt_volume
+    print(f"  Используется переданный GT объём: {total_gt_volume:.6f} м³")
+
+# Флаг наличия ground truth
+has_gt = total_gt_volume > 0
+
 # Для совместимости с сохранением результатов:
 # в реальных облаках/старых NPZ эти поля могут отсутствовать
 all_pts_clean = data.get('all_pts_clean', all_pts_noisy)
@@ -77,7 +92,10 @@ print(f"\n  Точек земли (исходно): {len(ground_pts)}")
 print(f"  Точек растительности (исходно): {len(vegetation_pts)}")
 print(f"  Точек итого (с шумом): {len(all_pts_noisy)}")
 print(f"  Растений: {len(plant_params)}")
-print(f"  Ground truth объём: {total_gt_volume:.6f} м³")
+if has_gt:
+    print(f"  Ground truth объём: {total_gt_volume:.6f} м³")
+else:
+    print(f"  Ground truth объём: недоступен")
 
 
 # ============================================================
@@ -172,14 +190,22 @@ voxel_results = {}
 print("\nВоксельный метод:")
 for vs in voxel_sizes:
     vol, n_vox = voxel_volume(vegetation_classified, voxel_size=vs)
-    err = (vol - total_gt_volume) / total_gt_volume * 100
-    voxel_results[vs] = {'volume': vol, 'n_voxels': n_vox, 'error_pct': err}
-    print(f"  size={vs:.3f} м: V={vol:.6f} м³, вокселей={n_vox}, ошибка={err:+.1f}%")
+    if has_gt:
+        err = (vol - total_gt_volume) / total_gt_volume * 100
+        voxel_results[vs] = {'volume': vol, 'n_voxels': n_vox, 'error_pct': err}
+        print(f"  size={vs:.3f} м: V={vol:.6f} м³, вокселей={n_vox}, ошибка={err:+.1f}%")
+    else:
+        voxel_results[vs] = {'volume': vol, 'n_voxels': n_vox, 'error_pct': None}
+        print(f"  size={vs:.3f} м: V={vol:.6f} м³, вокселей={n_vox}")
 
 # Convex Hull
 ch_volume = convex_hull_volume(vegetation_classified)
-ch_error = (ch_volume - total_gt_volume) / total_gt_volume * 100
-print(f"\nConvex Hull: V={ch_volume:.6f} м³, ошибка={ch_error:+.1f}%")
+if has_gt:
+    ch_error = (ch_volume - total_gt_volume) / total_gt_volume * 100
+    print(f"\nConvex Hull: V={ch_volume:.6f} м³, ошибка={ch_error:+.1f}%")
+else:
+    ch_error = None
+    print(f"\nConvex Hull: V={ch_volume:.6f} м³")
 
 # Alpha Shape
 alpha_values = [1.0, 5.0, 10.0, 20.0, 50.0]
@@ -188,9 +214,13 @@ print("\nAlpha Shape:")
 for av in alpha_values:
     vol = alpha_shape_volume(vegetation_classified, av)
     if vol > 0:
-        err = (vol - total_gt_volume) / total_gt_volume * 100
-        alpha_results[av] = {'volume': vol, 'error_pct': err}
-        print(f"  α={av}: V={vol:.6f} м³, ошибка={err:+.1f}%")
+        if has_gt:
+            err = (vol - total_gt_volume) / total_gt_volume * 100
+            alpha_results[av] = {'volume': vol, 'error_pct': err}
+            print(f"  α={av}: V={vol:.6f} м³, ошибка={err:+.1f}%")
+        else:
+            alpha_results[av] = {'volume': vol, 'error_pct': None}
+            print(f"  α={av}: V={vol:.6f} м³")
     else:
         print(f"  α={av}: не удалось вычислить")
 
@@ -199,35 +229,53 @@ for av in alpha_values:
 # 5. СВОДНАЯ ТАБЛИЦА
 # ============================================================
 
-print("\n" + "=" * 70)
-print(f"{'МЕТОД':<30} {'ОБЪЁМ (м³)':<14} {'ОШИБКА':<14} {'ПРИМЕЧАНИЕ'}")
-print("=" * 70)
-print(f"{'Ground Truth':<30} {total_gt_volume:<14.6f} {'—':<14} {'эталон'}")
-print("-" * 70)
+if has_gt:
+    print("\n" + "=" * 70)
+    print(f"{'МЕТОД':<30} {'ОБЪЁМ (м³)':<14} {'ОШИБКА':<14} {'ПРИМЕЧАНИЕ'}")
+    print("=" * 70)
+    print(f"{'Ground Truth':<30} {total_gt_volume:<14.6f} {'—':<14} {'эталон'}")
+    print("-" * 70)
+else:
+    print("\n" + "=" * 50)
+    print(f"{'МЕТОД':<30} {'ОБЪЁМ (м³)':<14}")
+    print("=" * 50)
 
 all_results = []
 
 for vs in voxel_sizes:
     r = voxel_results[vs]
     label = f"Voxel {vs*1000:.1f}мм"
-    note = "✓ лучший" if abs(r['error_pct']) == min(abs(voxel_results[v]['error_pct']) for v in voxel_sizes) else ""
-    print(f"{label:<30} {r['volume']:<14.6f} {r['error_pct']:+13.1f}% {note}")
+    if has_gt:
+        note = "✓ лучший" if abs(r['error_pct']) == min(abs(voxel_results[v]['error_pct']) for v in voxel_sizes) else ""
+        print(f"{label:<30} {r['volume']:<14.6f} {r['error_pct']:+13.1f}% {note}")
+    else:
+        print(f"{label:<30} {r['volume']:<14.6f}")
     all_results.append({'method': label, 'volume': r['volume'],
                         'error_pct': r['error_pct'], 'type': 'voxel'})
 
-print("-" * 70)
-print(f"{'Convex Hull':<30} {ch_volume:<14.6f} {ch_error:+13.1f}% завышает (оболочка)")
+if has_gt:
+    print("-" * 70)
+    print(f"{'Convex Hull':<30} {ch_volume:<14.6f} {ch_error:+13.1f}% завышает (оболочка)")
+else:
+    print("-" * 50)
+    print(f"{'Convex Hull':<30} {ch_volume:<14.6f}")
 all_results.append({'method': 'Convex Hull', 'volume': ch_volume,
                     'error_pct': ch_error, 'type': 'hull'})
 
 for av in sorted(alpha_results.keys()):
     r = alpha_results[av]
     label = f"Alpha Shape α={av}"
-    print(f"{label:<30} {r['volume']:<14.6f} {r['error_pct']:+13.1f}%")
+    if has_gt:
+        print(f"{label:<30} {r['volume']:<14.6f} {r['error_pct']:+13.1f}%")
+    else:
+        print(f"{label:<30} {r['volume']:<14.6f}")
     all_results.append({'method': label, 'volume': r['volume'],
                         'error_pct': r['error_pct'], 'type': 'alpha'})
 
-print("=" * 70)
+if has_gt:
+    print("=" * 70)
+else:
+    print("=" * 50)
 
 
 # ============================================================
@@ -245,6 +293,10 @@ plt.rcParams.update({
 fig = plt.figure(figsize=(16, 10))
 gs = GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.3)
 
+# Определяем общий диапазон Z для всех графиков
+z_min = min(all_pts_noisy[:, 2].min(), pts_filtered[:, 2].min()) - 0.1
+z_max = max(all_pts_noisy[:, 2].max(), pts_filtered[:, 2].max()) + 0.1
+
 # 1a: Исходное (с шумом)
 ax = fig.add_subplot(gs[0, 0])
 idx = np.random.choice(len(all_pts_noisy), min(12000, len(all_pts_noisy)), replace=False)
@@ -252,19 +304,29 @@ ax.scatter(all_pts_noisy[idx, 0], all_pts_noisy[idx, 2], s=0.2, alpha=0.4, c='gr
 ax.set_title('1. Исходное облако\n(с шумом и выбросами)')
 ax.set_xlabel('X, м')
 ax.set_ylabel('Z, м')
-ax.set_ylim(-0.3, 1.0)
+ax.set_ylim(z_min, z_max)
+ax.set_aspect('equal', adjustable='box')
 
-# 1b: После окклюзии (показываем до шума, но после окклюзии)
+# 1b: Вид сбоку (для синтетики - окклюзия, для реальных - другой ракурс)
 ax = fig.add_subplot(gs[0, 1])
 idx = np.random.choice(len(all_pts_noisy), min(12000, len(all_pts_noisy)), replace=False)
-colors_occ = np.where(all_pts_noisy[idx, 0] < -0.3, 'orange', 'steelblue')
-ax.scatter(all_pts_noisy[idx, 0], all_pts_noisy[idx, 2], s=0.2, alpha=0.4, c=colors_occ)
-ax.axvline(x=-0.3, color='red', linestyle=':', alpha=0.5)
-ax.annotate('← сканер', xy=(-2.5, 0.5), fontsize=9, color='red')
-ax.set_title('2. Эффект окклюзии\n(задние ряды разрежены)')
-ax.set_xlabel('X, м')
-ax.set_ylabel('Z, м')
-ax.set_ylim(-0.3, 1.0)
+if len(plant_params) > 0:
+    # Синтетические данные - показываем окклюзию
+    colors_occ = np.where(all_pts_noisy[idx, 0] < -0.3, 'orange', 'steelblue')
+    ax.scatter(all_pts_noisy[idx, 0], all_pts_noisy[idx, 2], s=0.2, alpha=0.4, c=colors_occ)
+    ax.axvline(x=-0.3, color='red', linestyle=':', alpha=0.5)
+    ax.annotate('← сканер', xy=(-2.5, 0.5), fontsize=9, color='red')
+    ax.set_title('2. Эффект окклюзии\n(задние ряды разрежены)')
+    ax.set_xlabel('X, м')
+    ax.set_ylabel('Z, м')
+else:
+    # Реальные данные - показываем вид сбоку YZ
+    ax.scatter(all_pts_noisy[idx, 1], all_pts_noisy[idx, 2], s=0.2, alpha=0.4, c='steelblue')
+    ax.set_title('2. Вид сбоку (Y-Z)\n(другой ракурс)')
+    ax.set_xlabel('Y, м')
+    ax.set_ylabel('Z, м')
+ax.set_ylim(z_min, z_max)
+ax.set_aspect('equal', adjustable='box')
 
 # 1c: После фильтрации
 ax = fig.add_subplot(gs[0, 2])
@@ -273,7 +335,8 @@ ax.scatter(pts_filtered[idx, 0], pts_filtered[idx, 2], s=0.2, alpha=0.4, c='stee
 ax.set_title('3. После фильтрации\n(SOR + Radius)')
 ax.set_xlabel('X, м')
 ax.set_ylabel('Z, м')
-ax.set_ylim(-0.3, 1.0)
+ax.set_ylim(z_min, z_max)
+ax.set_aspect('equal', adjustable='box')
 
 # 1d: Классификация
 ax = fig.add_subplot(gs[1, 0])
@@ -303,13 +366,14 @@ plt.colorbar(sc, ax=ax, label='Z, м', shrink=0.8)
 # 1f: Гистограмма высот
 ax = fig.add_subplot(gs[1, 2])
 ax.hist(vegetation_classified[:, 2], bins=50, color='#228B22', alpha=0.7, edgecolor='darkgreen')
-mean_h = np.mean([p['height'] for p in plant_params])
-ax.axvline(x=mean_h, color='red', linestyle='--', linewidth=2,
-           label=f'Средняя высота GT = {mean_h:.2f} м')
+if has_gt and len(plant_params) > 0:
+    mean_h = np.mean([p['height'] for p in plant_params])
+    ax.axvline(x=mean_h, color='red', linestyle='--', linewidth=2,
+               label=f'Средняя высота GT = {mean_h:.2f} м')
+    ax.legend(fontsize=9)
 ax.set_title('6. Распределение высот')
 ax.set_xlabel('Высота Z, м')
 ax.set_ylabel('Кол-во точек')
-ax.legend(fontsize=9)
 
 plt.savefig(f'{OUTPUT_DIR}/01_pipeline.png', dpi=150, bbox_inches='tight')
 plt.close()
@@ -329,48 +393,70 @@ errors_best = [r['error_pct'] for r in best_voxels]
 # График 1: Лучшие методы (5-15мм)
 bars1 = ax1.bar(range(len(methods_best)), volumes_best, color='#2196F3',
                 alpha=0.8, edgecolor='black', linewidth=0.5)
-ax1.axhline(y=total_gt_volume, color='red', linestyle='--', linewidth=2,
-            label=f'Ground Truth = {total_gt_volume:.4f} м³')
 
-for i, (bar, err) in enumerate(zip(bars1, errors_best)):
-    color = '#228B22' if abs(err) < 50 else '#FF6600' if abs(err) < 150 else '#CC0000'
-    ax1.text(bar.get_x() + bar.get_width() / 2., bar.get_height() + 0.0005,
-             f'{err:+.0f}%', ha='center', va='bottom', fontsize=9,
-             fontweight='bold', color=color)
+if has_gt:
+    ax1.axhline(y=total_gt_volume, color='red', linestyle='--', linewidth=2,
+                label=f'Ground Truth = {total_gt_volume:.4f} м³')
+
+    for i, (bar, err) in enumerate(zip(bars1, errors_best)):
+        color = '#228B22' if abs(err) < 50 else '#FF6600' if abs(err) < 150 else '#CC0000'
+        ax1.text(bar.get_x() + bar.get_width() / 2., bar.get_height() + 0.0005,
+                 f'{err:+.0f}%', ha='center', va='bottom', fontsize=9,
+                 fontweight='bold', color=color)
+    ax1.legend(fontsize=10)
 
 ax1.set_xticks(range(len(methods_best)))
 ax1.set_xticklabels(methods_best, rotation=45, ha='right', fontsize=9)
 ax1.set_ylabel('Объём, м³')
 ax1.set_title('Лучшие воксельные методы (5-15мм)')
-ax1.legend(fontsize=10)
 ax1.grid(True, alpha=0.3, axis='y')
 
 # График 2: Trade-off точность vs производительность (все размеры)
 vs_list = sorted(voxel_results.keys())
 n_voxels_list = [voxel_results[v]['n_voxels'] for v in vs_list]
-abs_errors_list = [abs(voxel_results[v]['error_pct']) for v in vs_list]
 vs_mm_list = [v * 1000 for v in vs_list]
 
-# Цвет по размеру вокселя
-colors = plt.cm.viridis(np.linspace(0, 1, len(vs_list)))
-scatter = ax2.scatter(n_voxels_list, abs_errors_list, s=100, c=colors,
-                     alpha=0.7, edgecolor='black', linewidth=1)
+if has_gt:
+    abs_errors_list = [abs(voxel_results[v]['error_pct']) for v in vs_list]
 
-# Аннотации для всех точек
-for i, (vs, n_vox, err) in enumerate(zip(vs_list, n_voxels_list, abs_errors_list)):
-    ax2.annotate(f'{vs*1000:.1f}мм',
-                xy=(n_vox, err), xytext=(5, 5),
-                textcoords='offset points', fontsize=8,
-                bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.3))
+    # Цвет по размеру вокселя
+    colors = plt.cm.viridis(np.linspace(0, 1, len(vs_list)))
+    scatter = ax2.scatter(n_voxels_list, abs_errors_list, s=100, c=colors,
+                         alpha=0.7, edgecolor='black', linewidth=1)
 
-ax2.set_xlabel('Количество вокселей')
-ax2.set_ylabel('|Ошибка|, %')
-ax2.set_title('Точность vs Вычислительная нагрузка')
-ax2.set_xscale('log')
-ax2.set_yscale('log')
-ax2.grid(True, alpha=0.3, which='both')
-ax2.axhline(y=20, color='green', linestyle=':', alpha=0.5, label='20% порог')
-ax2.legend(fontsize=9)
+    # Аннотации для всех точек
+    for i, (vs, n_vox, err) in enumerate(zip(vs_list, n_voxels_list, abs_errors_list)):
+        ax2.annotate(f'{vs*1000:.1f}мм',
+                    xy=(n_vox, err), xytext=(5, 5),
+                    textcoords='offset points', fontsize=8,
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.3))
+
+    ax2.set_xlabel('Количество вокселей')
+    ax2.set_ylabel('|Ошибка|, %')
+    ax2.set_title('Точность vs Вычислительная нагрузка')
+    ax2.set_xscale('log')
+    ax2.set_yscale('log')
+    ax2.grid(True, alpha=0.3, which='both')
+    ax2.axhline(y=20, color='green', linestyle=':', alpha=0.5, label='20% порог')
+    ax2.legend(fontsize=9)
+else:
+    # Без GT показываем просто объём vs количество вокселей
+    volumes_list = [voxel_results[v]['volume'] for v in vs_list]
+    colors = plt.cm.viridis(np.linspace(0, 1, len(vs_list)))
+    scatter = ax2.scatter(n_voxels_list, volumes_list, s=100, c=colors,
+                         alpha=0.7, edgecolor='black', linewidth=1)
+
+    for i, (vs, n_vox, vol) in enumerate(zip(vs_list, n_voxels_list, volumes_list)):
+        ax2.annotate(f'{vs*1000:.1f}мм',
+                    xy=(n_vox, vol), xytext=(5, 5),
+                    textcoords='offset points', fontsize=8,
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.3))
+
+    ax2.set_xlabel('Количество вокселей')
+    ax2.set_ylabel('Объём, м³')
+    ax2.set_title('Объём vs Вычислительная нагрузка')
+    ax2.set_xscale('log')
+    ax2.grid(True, alpha=0.3, which='both')
 
 plt.tight_layout()
 plt.savefig(f'{OUTPUT_DIR}/02_volume_comparison.png', dpi=150, bbox_inches='tight')
@@ -379,46 +465,43 @@ print("Сохранён: 02_volume_comparison.png")
 
 
 # --- График 3: Зависимость от размера вокселя ---
-fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
 vs_list = sorted(voxel_results.keys())
 vv_list = [voxel_results[v]['volume'] for v in vs_list]
-ve_list = [abs(voxel_results[v]['error_pct']) for v in vs_list]
-nv_list = [voxel_results[v]['n_voxels'] for v in vs_list]
 vs_mm = [v * 1000 for v in vs_list]
 
 # Объём
 ax = axes[0]
 ax.plot(vs_mm, vv_list, 'o-', color='#2196F3', linewidth=2, markersize=7)
-ax.axhline(y=total_gt_volume, color='red', linestyle='--', linewidth=1.5,
-           label=f'GT = {total_gt_volume:.5f}')
-ax.fill_between(vs_mm, total_gt_volume * 0.8, total_gt_volume * 1.2,
-                alpha=0.15, color='green', label='±20% от GT')
+if has_gt:
+    ax.axhline(y=total_gt_volume, color='red', linestyle='--', linewidth=1.5,
+               label=f'GT = {total_gt_volume:.5f}')
+    ax.fill_between(vs_mm, total_gt_volume * 0.8, total_gt_volume * 1.2,
+                    alpha=0.15, color='green', label='±20% от GT')
+    ax.legend(fontsize=9)
 ax.set_xlabel('Размер вокселя, мм')
 ax.set_ylabel('Объём, м³')
 ax.set_title('Оценка объёма')
-ax.legend(fontsize=9)
 ax.grid(True, alpha=0.3)
 
-# Ошибка
+# Ошибка (или текст если нет GT)
 ax = axes[1]
-ax.plot(vs_mm, ve_list, 's-', color='#f44336', linewidth=2, markersize=7)
-ax.axhline(y=20, color='green', linestyle=':', alpha=0.7, label='20% ошибка')
-ax.set_xlabel('Размер вокселя, мм')
-ax.set_ylabel('|Ошибка|, %')
-ax.set_title('Абсолютная ошибка')
-ax.legend(fontsize=9)
-ax.grid(True, alpha=0.3)
-ax.set_yscale('log')
-
-# Кол-во вокселей
-ax = axes[2]
-ax.plot(vs_mm, nv_list, 'D-', color='#9C27B0', linewidth=2, markersize=7)
-ax.set_xlabel('Размер вокселя, мм')
-ax.set_ylabel('Количество вокселей')
-ax.set_title('Вычислительная нагрузка')
-ax.grid(True, alpha=0.3)
-ax.set_yscale('log')
+if has_gt:
+    ve_list = [abs(voxel_results[v]['error_pct']) for v in vs_list]
+    ax.plot(vs_mm, ve_list, 's-', color='#f44336', linewidth=2, markersize=7)
+    ax.axhline(y=20, color='green', linestyle=':', alpha=0.7, label='20% ошибка')
+    ax.set_xlabel('Размер вокселя, мм')
+    ax.set_ylabel('|Ошибка|, %')
+    ax.set_title('Абсолютная ошибка')
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.set_yscale('log')
+else:
+    ax.text(0.5, 0.5, 'Объём не задан', ha='center', va='center',
+            fontsize=16, transform=ax.transAxes)
+    ax.set_title('Абсолютная ошибка')
+    ax.axis('off')
 
 plt.tight_layout()
 plt.savefig(f'{OUTPUT_DIR}/03_voxel_analysis.png', dpi=150, bbox_inches='tight')
@@ -434,7 +517,12 @@ method_volumes = []
 method_colors = []
 
 # Лучший воксельный
-best_vs = min(voxel_results, key=lambda v: abs(voxel_results[v]['error_pct']))
+if has_gt:
+    best_vs = min(voxel_results, key=lambda v: abs(voxel_results[v]['error_pct']))
+else:
+    # Без GT берём средний размер вокселя
+    best_vs = 0.007
+
 method_names.append(f'Voxel {best_vs*1000:.1f}мм')
 method_volumes.append(voxel_results[best_vs]['volume'])
 method_colors.append('#2196F3')
@@ -450,26 +538,39 @@ for av in sorted(alpha_results.keys()):
     method_volumes.append(alpha_results[av]['volume'])
     method_colors.append('#4CAF50')
 
-method_names.append('Ground Truth')
-method_volumes.append(total_gt_volume)
-method_colors.append('#f44336')
+if has_gt:
+    method_names.append('Ground Truth')
+    method_volumes.append(total_gt_volume)
+    method_colors.append('#f44336')
 
 bars = ax.barh(range(len(method_names)), method_volumes, color=method_colors,
                alpha=0.8, edgecolor='black', linewidth=0.5)
-ax.axvline(x=total_gt_volume, color='red', linestyle='--', linewidth=2)
 
-for i, (bar, vol) in enumerate(zip(bars, method_volumes)):
-    if vol > 0.1:
-        ratio = vol / total_gt_volume
-        ax.text(vol + 0.02, bar.get_y() + bar.get_height() / 2,
-                f'×{ratio:.0f}', va='center', fontsize=10, fontweight='bold')
+if has_gt:
+    ax.axvline(x=total_gt_volume, color='red', linestyle='--', linewidth=2)
+
+    for i, (bar, vol) in enumerate(zip(bars, method_volumes)):
+        if vol > 0.1:
+            ratio = vol / total_gt_volume
+            ax.text(vol + 0.02, bar.get_y() + bar.get_height() / 2,
+                    f'×{ratio:.0f}', va='center', fontsize=10, fontweight='bold')
+
+    ax.set_xlabel('Объём, м³')
+    ax.set_title('Convex Hull и Alpha Shape завышают объём\n'
+                 '(считают оболочку, а не тонкие структуры растений)')
+    ax.set_xscale('log')
+else:
+    # Без GT просто показываем сравнение объёмов
+    for i, (bar, vol) in enumerate(zip(bars, method_volumes)):
+        ax.text(vol * 1.05, bar.get_y() + bar.get_height() / 2,
+                f'{vol:.4f} м³', va='center', fontsize=9)
+
+    ax.set_xlabel('Объём, м³')
+    ax.set_title('Сравнение методов оценки объёма')
+    ax.set_xscale('log')
 
 ax.set_yticks(range(len(method_names)))
 ax.set_yticklabels(method_names, fontsize=10)
-ax.set_xlabel('Объём, м³')
-ax.set_title('Convex Hull и Alpha Shape завышают объём\n'
-             '(считают оболочку, а не тонкие структуры растений)')
-ax.set_xscale('log')
 ax.grid(True, alpha=0.3, axis='x')
 
 plt.tight_layout()
@@ -560,36 +661,57 @@ print("Сохранён: 3d_classified.html")
 # ============================================================
 
 results_data = {
-    'ground_truth_volume_m3': total_gt_volume,
+    'ground_truth_volume_m3': total_gt_volume if has_gt else None,
     'n_plants': len(plant_params),
-    'mean_height_m': float(mean_h),
     'scanner_position': scanner_pos.tolist(),
     'points': {
         'raw_total': len(all_pts_clean),
         'after_occlusion': len(all_pts_occluded),
-        'occlusion_removed_pct': round(100 * n_occluded / len(all_pts_clean), 1),
+        'occlusion_removed_pct': round(100 * n_occluded / len(all_pts_clean), 1) if len(all_pts_clean) > 0 else 0,
         'with_noise': len(all_pts_noisy),
         'after_sor': len(pts_after_sor),
         'after_radius': len(pts_filtered),
         'ground': len(ground_classified),
         'vegetation': len(vegetation_classified)
     },
-    'voxel_results': {f'{k*1000:.0f}mm': {
-        'volume': v['volume'],
-        'n_voxels': v['n_voxels'],
-        'error_pct': round(v['error_pct'], 1)
-    } for k, v in voxel_results.items()},
+    'voxel_results': {},
     'convex_hull': {
         'volume': ch_volume,
-        'error_pct': round(ch_error, 1)
+        'error_pct': round(ch_error, 1) if ch_error is not None else None
     },
-    'alpha_shape': {f'alpha_{k}': {
-        'volume': v['volume'],
-        'error_pct': round(v['error_pct'], 1)
-    } for k, v in alpha_results.items()},
-    'best_method': f'Voxel {best_vs*1000:.0f}mm',
-    'best_error_pct': round(abs(voxel_results[best_vs]['error_pct']), 1)
+    'alpha_shape': {},
 }
+
+# Добавляем mean_height только если есть plant_params
+if len(plant_params) > 0 and has_gt:
+    mean_h = np.mean([p['height'] for p in plant_params])
+    results_data['mean_height_m'] = float(mean_h)
+
+# Воксельные результаты
+for k, v in voxel_results.items():
+    results_data['voxel_results'][f'{k*1000:.0f}mm'] = {
+        'volume': v['volume'],
+        'n_voxels': v['n_voxels'],
+        'error_pct': round(v['error_pct'], 1) if v['error_pct'] is not None else None
+    }
+
+# Alpha shape результаты
+for k, v in alpha_results.items():
+    results_data['alpha_shape'][f'alpha_{k}'] = {
+        'volume': v['volume'],
+        'error_pct': round(v['error_pct'], 1) if v['error_pct'] is not None else None
+    }
+
+# Лучший метод
+if has_gt:
+    best_vs = min(voxel_results, key=lambda v: abs(voxel_results[v]['error_pct']))
+    results_data['best_method'] = f'Voxel {best_vs*1000:.0f}mm'
+    results_data['best_error_pct'] = round(abs(voxel_results[best_vs]['error_pct']), 1)
+else:
+    # Без GT используем дефолтный оптимальный размер вокселя
+    best_vs = DEFAULT_VOXEL_SIZE_NO_GT
+    results_data['best_method'] = f'Voxel {best_vs*1000:.0f}mm (default optimal)'
+    results_data['best_error_pct'] = None
 
 with open(f'{OUTPUT_DIR}/results.json', 'w') as f:
     json.dump(results_data, f, indent=2, ensure_ascii=False)
@@ -598,4 +720,9 @@ print("\nСохранён: results.json")
 print("\n" + "=" * 60)
 print("ЭКСПЕРИМЕНТ ЗАВЕРШЁН")
 print("=" * 60)
-print(f"\nЛучший метод: Voxel {best_vs*1000:.1f}мм, ошибка {abs(voxel_results[best_vs]['error_pct']):.1f}%")
+
+if has_gt:
+    print(f"\nЛучший метод: Voxel {best_vs*1000:.1f}мм, ошибка {abs(voxel_results[best_vs]['error_pct']):.1f}%")
+else:
+    print(f"\nРекомендуемый метод: Voxel {best_vs*1000:.1f}мм")
+    print(f"Оценка объёма: {voxel_results[best_vs]['volume']:.6f} м³")
