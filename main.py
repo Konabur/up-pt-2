@@ -661,7 +661,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # Подвыборка для производительности
-max_3d_pts = 8000
+max_3d_pts = 20000
 
 def subsample(pts, n):
     if len(pts) > n:
@@ -690,9 +690,30 @@ fig3d_raw.update_layout(
 fig3d_raw.write_html(f'{OUTPUT_DIR}/3d_raw.html')
 print("Сохранён: 3d_raw.html")
 
+# --- 3D: Отфильтрованное облако (после SOR) ---
+pts_f_sub = subsample(pts_filtered, max_3d_pts)
+fig3d_filt = go.Figure(data=[go.Scatter3d(
+    x=pts_f_sub[:, 0], y=pts_f_sub[:, 1], z=pts_f_sub[:, 2],
+    mode='markers',
+    marker=dict(size=1.2, color=pts_f_sub[:, 2], colorscale='Viridis',
+                opacity=0.6, colorbar=dict(title='Z, м')),
+    name='Точки'
+)])
+fig3d_filt.update_layout(
+    title=f'Отфильтрованное облако (после SOR, {len(pts_filtered):,} точек)',
+    scene=dict(
+        xaxis_title='X, м', yaxis_title='Y, м', zaxis_title='Z, м',
+        aspectmode='data',
+        camera=dict(eye=dict(x=-1.5, y=-1.5, z=1.0))
+    ),
+    width=900, height=650
+)
+fig3d_filt.write_html(f'{OUTPUT_DIR}/3d_filtered.html')
+print("Сохранён: 3d_filtered.html")
+
 # --- 3D: Классифицированное облако ---
-g_sub = subsample(ground_classified, 3000)
-v_sub = subsample(vegetation_classified, 5000)
+g_sub = subsample(ground_classified, max_3d_pts // 2)
+v_sub = subsample(vegetation_classified, max_3d_pts)
 
 fig3d_class = go.Figure()
 fig3d_class.add_trace(go.Scatter3d(
