@@ -52,6 +52,15 @@ parser.add_argument('--skip-hull-methods', action='store_true',
 parser.add_argument('--flip-z', action='store_true',
                    default=os.getenv('TPCVE_FLIP_Z', '').lower() in ('1', 'true', 'yes'),
                    help='Инвертировать ось Z (если земля сверху, сенсор смотрит вниз)')
+parser.add_argument('--downsample', type=float,
+                   default=float(os.getenv('TPCVE_DOWNSAMPLE', '0') or 0),
+                   help='Voxel downsample перед SOR (м), 0 = без даунсемплинга. Рекомендуется 0.003-0.005 для плотных реальных облаков')
+parser.add_argument('--sor-std-ratio', type=float,
+                   default=float(os.getenv('TPCVE_SOR_STD_RATIO', '1.5')),
+                   help='SOR std_ratio (1.5=агрессивно для синтетики, 2.0-3.0 для реальных лидаров)')
+parser.add_argument('--min-range', type=float,
+                   default=float(os.getenv('TPCVE_MIN_RANGE', '0') or 0),
+                   help='Удалить точки ближе этого расстояния (м) от сенсора (0 = без фильтра)')
 args = parser.parse_args()
 
 OUTPUT_DIR = args.output_dir
@@ -133,19 +142,46 @@ print("\n" + "=" * 60)
 print("ФИЛЬТРАЦИЯ")
 print("=" * 60)
 
+# Min-range фильтр: удалить точки в цилиндре (по XY) вокруг сенсора.
+if args.min_range > 0:
+    dxy = np.linalg.norm(all_pts_noisy[:, :2] - scanner_pos[:2], axis=1)
+    keep = dxy >= args.min_range
+    n_removed = (~keep).sum()
+    pts_for_filter = all_pts_noisy[keep]
+    print(f"Min-range фильтр (XY, {args.min_range} м): удалено {n_removed:,} точек, "
+          f"осталось {len(pts_for_filter):,}")
+else:
+    pts_for_filter = all_pts_noisy
+
 pcd = o3d.geometry.PointCloud()
-pcd.points = o3d.utility.Vector3dVector(all_pts_noisy)
+pcd.points = o3d.utility.Vector3dVector(pts_for_filter)
+
+# Voxel downsample перед SOR — обязателен для больших реальных облаков.
+# SOR имеет сложность O(N·k·log N) и на 1M+ точек занимает минуты.
+if args.downsample > 0:
+    n_before = len(pcd.points)
+    pcd = pcd.voxel_down_sample(voxel_size=args.downsample)
+    n_after = len(pcd.points)
+    print(f"Voxel downsample ({args.downsample*1000:.1f} мм): {n_before:,} → {n_after:,} точек "
+          f"({100*(1-n_after/n_before):.1f}% сжатие)")
 
 # SOR фильтр
-pcd_sor, ind_sor = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=1.5)
+n_in = len(pcd.points)
+print(f"SOR (k=20, σ={args.sor_std_ratio}): {n_in:,} точек...", flush=True)
+pcd_sor, ind_sor = pcd.remove_statistical_outlier(
+    nb_neighbors=20, std_ratio=args.sor_std_ratio, print_progress=True
+)
 pts_after_sor = np.asarray(pcd_sor.points)
-n_removed_sor = len(all_pts_noisy) - len(pts_after_sor)
-print(f"SOR (k=20, σ=1.5): удалено {n_removed_sor} ({100 * n_removed_sor / len(all_pts_noisy):.1f}%)")
+n_removed_sor = n_in - len(pts_after_sor)
+print(f"SOR: удалено {n_removed_sor} ({100 * n_removed_sor / n_in:.1f}%), осталось {len(pts_after_sor):,}")
 
 # Radius outlier removal убран — слишком агрессивный даже с мягкими параметрами
 pts_filtered = pts_after_sor
-print(f"Radius outlier removal: пропущен (удалял точки земли)")
-print(f"Итого после фильтрации: {len(pts_filtered)}")
+print(f"Итого после фильтрации: {len(pts_filtered):,}")
+
+# Сохранить отфильтрованное облако для повторных запусков
+np.savez_compressed(f'{OUTPUT_DIR}/cloud_filtered.npz', points=pts_filtered)
+print(f"Фильтрованное облако сохранено в {OUTPUT_DIR}/cloud_filtered.npz")
 
 
 # ============================================================
