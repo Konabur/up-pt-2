@@ -49,6 +49,9 @@ parser.add_argument('--default-voxel-size', type=float,
 parser.add_argument('--skip-hull-methods', action='store_true',
                    default=os.getenv('TPCVE_SKIP_HULL_METHODS', '').lower() in ('1', 'true', 'yes'),
                    help='Пропустить Convex Hull и Alpha Shape (ускорение)')
+parser.add_argument('--flip-z', action='store_true',
+                   default=os.getenv('TPCVE_FLIP_Z', '').lower() in ('1', 'true', 'yes'),
+                   help='Инвертировать ось Z (если земля сверху, сенсор смотрит вниз)')
 args = parser.parse_args()
 
 OUTPUT_DIR = args.output_dir
@@ -87,6 +90,17 @@ total_gt_volume = data['total_gt_volume']
 if args.gt_volume is not None:
     total_gt_volume = args.gt_volume
     print(f"  Используется переданный GT объём: {total_gt_volume:.6f} м³")
+
+# Нормализация Z для реальных облаков: земля должна быть в Z=0, растительность выше.
+# --flip-z используется если сенсор смотрел вниз (земля оказалась сверху).
+# После флипа (или без него) сдвигаем min(Z) к 0.
+if args.cloud and Path(args.cloud).suffix.lower() != '.npz':
+    all_pts_noisy = all_pts_noisy.copy()
+    if args.flip_z:
+        all_pts_noisy[:, 2] = -all_pts_noisy[:, 2]
+    all_pts_noisy[:, 2] -= all_pts_noisy[:, 2].min()
+    print(f"  Z нормализован{' (flip)' if args.flip_z else ''}: "
+          f"{all_pts_noisy[:,2].min():.3f}..{all_pts_noisy[:,2].max():.3f} м")
 
 # Флаг наличия ground truth
 has_gt = total_gt_volume > 0
