@@ -252,6 +252,112 @@ def detect_units(points):
         return 'cm'
 
 
+def load_db3_cloud(filepath):
+    """
+    Загрузка облака точек из ROS 2 bag-файла (.db3).
+
+    Читает .db3 напрямую через sqlite3 (не требует metadata.yaml),
+    CDR-десериализацию выполняет через rosbags.
+
+    Args:
+        filepath: путь к .db3 файлу
+
+    Returns:
+        np.ndarray: массив точек (N, 3) в исходных единицах (до конвертации)
+
+    Raises:
+        ImportError: если rosbags не установлен
+        ValueError: если в bag нет топиков PointCloud2
+    """
+    try:
+        from rosbags.typesys import Stores, get_typestore
+    except ImportError:
+        raise ImportError("Для .db3 нужен rosbags: uv add rosbags")
+
+    import sqlite3
+
+    # Маппинг типов PointField datatype → numpy dtype
+    FIELD_DTYPE = {
+        1: np.int8,
+        2: np.uint8,
+        3: np.int16,
+        4: np.uint16,
+        5: np.int32,
+        6: np.uint32,
+        7: np.float32,
+        8: np.float64,
+    }
+
+    typestore = get_typestore(Stores.LATEST)
+    msgtype = 'sensor_msgs/msg/PointCloud2'
+
+    con = sqlite3.connect(str(filepath))
+    try:
+        # Найти топики с PointCloud2
+        rows = con.execute(
+            "SELECT id, name FROM topics WHERE type = ?", (msgtype,)
+        ).fetchall()
+
+        if not rows:
+            available = [r[0] for r in con.execute("SELECT name FROM topics").fetchall()]
+            raise ValueError(
+                f"В bag не найдено топиков PointCloud2. "
+                f"Доступные топики: {available}"
+            )
+
+        topic_id, topic_name = rows[0]
+        print(f"  ROS 2 bag: топик '{topic_name}' ({msgtype})")
+        if len(rows) > 1:
+            print(f"  Найдено несколько PointCloud2 топиков: {[r[1] for r in rows]}, используется первый")
+
+        messages = con.execute(
+            "SELECT data FROM messages WHERE topic_id = ? ORDER BY timestamp",
+            (topic_id,)
+        ).fetchall()
+    finally:
+        con.close()
+
+    if not messages:
+        raise ValueError(f"В топике '{topic_name}' нет сообщений")
+
+    all_points = []
+    for (rawdata,) in messages:
+        msg = typestore.deserialize_cdr(bytes(rawdata), msgtype)
+
+        field_map = {f.name: f for f in msg.fields}
+        if not all(k in field_map for k in ('x', 'y', 'z')):
+            continue
+
+        point_step = msg.point_step
+        n_points = msg.width * msg.height
+        raw = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+
+        points_xyz = np.empty((n_points, 3), dtype=np.float64)
+        for i, axis in enumerate(['x', 'y', 'z']):
+            f = field_map[axis]
+            dt = FIELD_DTYPE.get(f.datatype, np.float32)
+            itemsize = np.dtype(dt).itemsize
+            # Извлечь байты каждого поля для всех точек одним срезом
+            field_raw = np.lib.stride_tricks.as_strided(
+                raw[f.offset:],
+                shape=(n_points, itemsize),
+                strides=(point_step, 1)
+            ).copy()
+            vals = np.frombuffer(field_raw.tobytes(), dtype=dt)
+            points_xyz[:, i] = vals.astype(np.float64)
+
+        # Отфильтровать NaN/Inf (незаполненные точки организованных облаков)
+        valid = np.isfinite(points_xyz).all(axis=1)
+        points_xyz = points_xyz[valid]
+        if len(points_xyz) > 0:
+            all_points.append(points_xyz)
+
+    if not all_points:
+        raise ValueError("В bag нет валидных сообщений PointCloud2 с xyz данными")
+
+    return np.vstack(all_points)
+
+
 def load_real_cloud(filepath, units='auto'):
     """
     Загрузка реального облака точек из различных форматов.
@@ -259,6 +365,7 @@ def load_real_cloud(filepath, units='auto'):
     Поддерживаемые форматы:
     - PCD, PLY, XYZ, PTS (через Open3D)
     - LAS, LAZ (через laspy, если установлен)
+    - DB3, ROS 2 bag (через rosbags, если установлен)
 
     Args:
         filepath: путь к файлу
@@ -276,7 +383,6 @@ def load_real_cloud(filepath, units='auto'):
         }
     """
     import open3d as o3d
-    from pathlib import Path
 
     ext = Path(filepath).suffix.lower()
 
@@ -293,6 +399,10 @@ def load_real_cloud(filepath, units='auto'):
     elif ext in ['.pcd', '.ply', '.xyz', '.pts', '.txt']:
         pcd = o3d.io.read_point_cloud(filepath)
         points = np.asarray(pcd.points)
+
+    # ROS 2 bag (.db3)
+    elif ext == '.db3':
+        points = load_db3_cloud(filepath)
 
     else:
         raise ValueError(f"Неподдерживаемый формат: {ext}")
