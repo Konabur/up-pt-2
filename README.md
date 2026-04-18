@@ -95,6 +95,7 @@ TPCVE_SKIP_HULL_METHODS=false
 - `.npz` — синтетические данные (с ground truth)
 - `.las`, `.laz` — стандарт индустрии
 - `.pcd`, `.ply`, `.xyz`, `.pts` — Open3D форматы
+- `.db3` — ROS 2 bag файлы (rosbags)
 
 Для реальных облаков:
 - Автоопределение единиц измерения (м/см/мм)

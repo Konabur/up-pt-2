@@ -59,6 +59,8 @@ jupyter-core==5.9.1
     # via nbformat
 kiwisolver==1.5.0
     # via matplotlib
+lz4==4.4.5 ; python_full_version < '3.14'
+    # via rosbags
 markupsafe==3.0.3
     # via
     #   flask
@@ -84,6 +86,7 @@ numpy==2.4.4
     #   open3d
     #   pandas
     #   pyquaternion
+    #   rosbags
     #   scikit-learn
     #   scipy
     #   shapely
@@ -125,12 +128,18 @@ requests==2.33.1
     # via dash
 retrying==1.4.2
     # via dash
+rosbags==0.11.0
+    # via tls-volume-estimation
 rpds-py==0.30.0
     # via
     #   jsonschema
     #   referencing
 rtree==1.4.1
     # via alphashape
+ruamel-yaml==0.19.1
+    # via rosbags
+safelz4==0.2.1 ; python_full_version >= '3.14'
+    # via rosbags
 scikit-learn==1.8.0
     # via open3d
 scipy==1.17.1
@@ -158,6 +167,7 @@ typing-extensions==4.15.0
     # via
     #   dash
     #   referencing
+    #   rosbags
 tzdata==2025.3 ; sys_platform == 'emscripten' or sys_platform == 'win32'
     # via pandas
 urllib3==2.6.3
@@ -169,3 +179,5 @@ werkzeug==3.1.7
     #   open3d
 zipp==3.23.0
     # via importlib-metadata
+zstandard==0.25.0
+    # via rosbags
