@@ -22,15 +22,28 @@ import argparse
 from pathlib import Path
 from dotenv import load_dotenv
 from generate_cloud import generate_full_cloud, load_cloud, save_cloud, load_real_cloud
+import plotly.graph_objects as go
 
-# Загрузка переменных окружения из .env (override=True - перезаписывать существующие)
-load_dotenv(override=True)
+# Предварительный парсинг для получения --env-file
+pre_parser = argparse.ArgumentParser(add_help=False)
+pre_parser.add_argument('--env-file', type=str, default=None)
+pre_args, _ = pre_parser.parse_known_args()
+
+# Загрузка env-файла: --env-file → .env → settings.env
+if pre_args.env_file and os.path.exists(pre_args.env_file):
+    load_dotenv(pre_args.env_file, override=True)
+elif os.path.exists('.env'):
+    load_dotenv('.env', override=True)
+elif os.path.exists('settings.env'):
+    load_dotenv('settings.env', override=True)
 
 # ============================================================
 # 1. ЗАГРУЗКА ИЛИ ГЕНЕРАЦИЯ ОБЛАКА ТОЧЕК
 # ============================================================
 
 parser = argparse.ArgumentParser(description='Анализ объёма растительного покрова TLS')
+parser.add_argument('--env-file', type=str, default=None,
+                   help='Путь к .env файлу с настройками (по умолчанию: .env или settings.env)')
 parser.add_argument('--cloud', type=str, default=os.getenv('TPCVE_CLOUD'),
                    help='Путь к облаку точек (.npz, .las, .laz, .pcd, .ply, .xyz, .pts)')
 parser.add_argument('--save-cloud', type=str, default=os.getenv('TPCVE_SAVE_CLOUD'),
@@ -239,9 +252,7 @@ def alpha_shape_volume(points, alpha_value):
         else:
             points_sub = points
         alpha_sh = alphashape.alphashape(points_sub, alpha_value)
-        if hasattr(alpha_sh, 'volume'):
-            return alpha_sh.volume
-        return 0.0
+        return getattr(alpha_sh, 'volume', 0.0)
     except Exception as e:
         print(f"    Alpha shape error: {e}")
         return 0.0
@@ -657,8 +668,6 @@ else:
 # ============================================================
 
 print("\nГенерация 3D визуализации...")
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
 # Подвыборка для производительности
 max_3d_pts = 20000
