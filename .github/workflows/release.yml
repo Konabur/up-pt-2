@@ -26,8 +26,17 @@ jobs:
       - name: Run experiment
         run: uv run main.py
 
+      - name: Process all datasets
+        run: bash scripts/process_data.sh
+
       - name: Create results archive
-        run: zip -r results.zip results/
+        run: |
+          cd results
+          for dataset in */; do
+            zip -r "../${dataset%/}.zip" "$dataset"
+          done
+          cd ..
+          zip -r results-all.zip results/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -37,16 +46,22 @@ jobs:
             results/*.html
             results/*.json
             results/*.npz
-            results.zip
+            results/*.zip
+            results-all.zip
           body: |
             Эксперимент ${{ github.ref_name }}
 
-            Результаты анализа объёма растительного покрова TLS.
+            Результаты анализа объёма растительного покрова TLS для всех датасетов.
 
             **Файлы:**
-            - `results.zip` - архив со всеми результатами (графики, 3D визуализация, данные, облако точек)
             - `*.png` - графики анализа
             - `*.html` - интерактивная 3D визуализация
             - `results.json` - метрики эксперимента
             - `cloud.npz` - облако точек
-          fail_on_unmatched_files: true
+
+            **Архивы:**
+            - `results-all.zip` - все датасеты вместе
+            - `<dataset>.zip` - отдельный архив для каждого датасета
+
+            Каждый архив содержит: графики (PNG), 3D визуализацию (HTML), метрики (JSON), облако точек (NPZ).
+          fail_on_unmatched_files: false
